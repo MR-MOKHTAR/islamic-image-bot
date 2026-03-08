@@ -250,7 +250,7 @@ async function setupSecurePage(page: Page): Promise<void> {
 // ضریب مقیاس — عدد بالاتر = کیفیت بیشتر، حجم بیشتر
 // 2 = Full HD کیفیت (توصیه شده)
 // 3 = 4K کیفیت (برای متون ریز یا پوسترهای بزرگ)
-const SCALE_FACTOR = 2;
+const SCALE_FACTOR = 3;
 
 export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
   validateHtml(htmlContent);

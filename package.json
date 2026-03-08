@@ -1,0 +1,27 @@
+{
+  "name": "islamic-image-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for generating beautiful Islamic content images",
+  "main": "dist/bot.js",
+  "scripts": {
+    "postinstall": "npx puppeteer browsers install chrome",
+    "dev": "ts-node src/bot.ts",
+    "build": "tsc",
+    "start": "node dist/bot.js",
+    "watch": "ts-node-dev --respawn src/bot.ts"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "puppeteer": "^22.0.0",
+    "dotenv": "^16.4.1",
+    "axios": "^1.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.10",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "@types/bun": "latest"
+  },
+  "private": true
+}

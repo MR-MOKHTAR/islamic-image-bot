@@ -41,8 +41,9 @@ const LAUNCH_ARGS = [
   "--disable-accelerated-2d-canvas",
   "--disable-gpu",
   "--font-render-hinting=none",
-  // فعال‌سازی رندر ایموجی رنگی
   "--enable-font-antialiasing",
+  // کیفیت بالاتر رندر
+  "--force-device-scale-factor=2",
 ];
 
 async function getBrowser(): Promise<Browser> {
@@ -53,7 +54,7 @@ async function getBrowser(): Promise<Browser> {
       headless: true,
       args: LAUNCH_ARGS,
     });
-    console.log("✅ Chrome از Puppeteer cache بارگذاری شد.");
+    console.log("✅ Chrome بارگذاری شد.");
     return browserInstance;
   } catch {
     console.warn("⚠️  Chrome cache یافت نشد، جستجو در سیستم...");
@@ -116,7 +117,7 @@ export function downloadText(url: string, retries = 3): Promise<string> {
       req.on("timeout", () => {
         req.destroy();
         if (remaining > 1) {
-          console.warn(`⚠️  timeout، تلاش مجدد (${remaining - 1} بار باقی)...`);
+          console.warn(`⚠️  timeout، تلاش مجدد (${remaining - 1})...`);
           setTimeout(() => attempt(remaining - 1), 1500);
         } else {
           reject(new Error("دانلود فایل پس از چند تلاش موفق نشد (timeout)"));
@@ -124,11 +125,8 @@ export function downloadText(url: string, retries = 3): Promise<string> {
       });
 
       req.on("error", (err) => {
-        if (remaining > 1) {
-          setTimeout(() => attempt(remaining - 1), 1500);
-        } else {
-          reject(err);
-        }
+        if (remaining > 1) setTimeout(() => attempt(remaining - 1), 1500);
+        else reject(err);
       });
     };
     attempt(retries);
@@ -167,30 +165,19 @@ function validateHtml(html: string): void {
     /window\.location/i,
   ];
 
-  for (const p of dangerous) {
-    if (p.test(html))
-      throw new Error(`محتوای HTML به دلایل امنیتی رد شد (الگوی مشکوک: ${p})`);
-  }
+  for (const p of dangerous)
+    if (p.test(html)) throw new Error(`محتوای HTML به دلایل امنیتی رد شد`);
 }
 
 // ────────────────────────────────────────────────
-//  تزریق فونت ایموجی و فارسی به HTML
-//  (مستقل از اینکه HTML چه فونتی تعریف کرده)
+//  تزریق فونت ایموجی و فارسی
 // ────────────────────────────────────────────────
 const EMOJI_FONT_INJECT = `
 <style id="__emoji_font_fix__">
-  /* فونت ایموجی را به انتهای همه font-family ها اضافه می‌کند */
-  @font-face {
-    font-family: "NotoEmoji";
-    src: local("Noto Color Emoji"), local("Apple Color Emoji"),
-         local("Segoe UI Emoji"), local("Twemoji Mozilla");
-  }
-  /* override سراسری: فونت اصلی حفظ می‌شود، ایموجی fallback اضافه می‌شود */
   *:not(#__emoji_font_fix__) {
     font-family: inherit, "Noto Color Emoji", "Segoe UI Emoji",
                  "Apple Color Emoji", "Twemoji Mozilla" !important;
   }
-  /* فارسی/عربی پیش‌فرض */
   body {
     font-family: "Vazirmatn", "Noto Sans Arabic", "Tahoma",
                  "Noto Color Emoji", "Segoe UI Emoji", sans-serif;
@@ -238,7 +225,6 @@ async function setupSecurePage(page: Page): Promise<void> {
       req.continue();
       return;
     }
-
     if (
       type === "xhr" ||
       type === "fetch" ||
@@ -248,7 +234,6 @@ async function setupSecurePage(page: Page): Promise<void> {
       req.abort("blockedbyclient");
       return;
     }
-
     if (type === "script") {
       req.abort("blockedbyclient");
       return;
@@ -259,12 +244,17 @@ async function setupSecurePage(page: Page): Promise<void> {
 }
 
 // ────────────────────────────────────────────────
-//  HTML → تصویر PNG
+//  HTML → تصویر PNG با کیفیت بالا
 // ────────────────────────────────────────────────
+
+// ضریب مقیاس — عدد بالاتر = کیفیت بیشتر، حجم بیشتر
+// 2 = Full HD کیفیت (توصیه شده)
+// 3 = 4K کیفیت (برای متون ریز یا پوسترهای بزرگ)
+const SCALE_FACTOR = 2;
+
 export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
   validateHtml(htmlContent);
 
-  // تزریق فونت ایموجی
   const enrichedHtml = injectEmojiFont(htmlContent);
 
   const browser = await getBrowser();
@@ -274,6 +264,7 @@ export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
     await setupSecurePage(page);
     page.setDefaultTimeout(40_000);
 
+    // ── مرحله ۱: viewport اولیه برای محاسبه ابعاد واقعی ──
     await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
 
     await page.setContent(enrichedHtml, {
@@ -281,14 +272,10 @@ export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
       timeout: 40_000,
     });
 
-    // صبر برای بارگذاری کامل همه فونت‌ها (مهم برای Google Fonts و ایموجی)
+    // صبر برای بارگذاری کامل فونت‌ها
     await page.evaluateHandle("document.fonts.ready");
 
-    // یک فریم اضافه برای اطمینان از رندر نهایی
-    await page.evaluate(
-      () => new Promise<void>((r) => requestAnimationFrame(() => r())),
-    );
-
+    // ── مرحله ۲: اندازه‌گیری ابعاد واقعی محتوا ──
     const dims: { w: number; h: number } = await page.evaluate(() => ({
       w: Math.max(
         document.body.scrollWidth,
@@ -302,16 +289,34 @@ export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
       ),
     }));
 
-    const safeW = Math.min(dims.w, 4096);
-    const safeH = Math.min(dims.h, 8192);
+    // سقف ابعاد منطقی (قبل از اعمال scale)
+    const logicalW = Math.min(dims.w, 2048);
+    const logicalH = Math.min(dims.h, 4096);
 
+    // ── مرحله ۳: اعمال deviceScaleFactor برای کیفیت بالا ──
+    // نتیجه: تصویر خروجی = logicalW * SCALE_FACTOR پیکسل
     await page.setViewport({
-      width: safeW,
-      height: safeH,
-      deviceScaleFactor: 1,
+      width: logicalW,
+      height: logicalH,
+      deviceScaleFactor: SCALE_FACTOR,
     });
 
-    return Buffer.from(await page.screenshot({ type: "png", fullPage: true }));
+    // یک فریم برای اطمینان از رندر نهایی
+    await page.evaluate(
+      () => new Promise<void>((r) => requestAnimationFrame(() => r())),
+    );
+
+    const screenshot = await page.screenshot({
+      type: "png",
+      fullPage: true,
+    });
+
+    console.log(
+      `✅ رندر شد: ${logicalW}x${logicalH} logical → ` +
+        `${logicalW * SCALE_FACTOR}x${logicalH * SCALE_FACTOR}px واقعی`,
+    );
+
+    return Buffer.from(screenshot);
   } finally {
     await page.close().catch(() => {});
   }

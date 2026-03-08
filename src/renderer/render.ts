@@ -4,9 +4,6 @@ import * as fs from "fs";
 import * as https from "https";
 import * as http from "http";
 
-// ────────────────────────────────────────────────
-//  پیدا کردن Chrome روی سیستم
-// ────────────────────────────────────────────────
 function findSystemChrome(): string | undefined {
   const candidates = [
     "/usr/bin/google-chrome",
@@ -44,6 +41,8 @@ const LAUNCH_ARGS = [
   "--disable-accelerated-2d-canvas",
   "--disable-gpu",
   "--font-render-hinting=none",
+  // فعال‌سازی رندر ایموجی رنگی
+  "--enable-font-antialiasing",
 ];
 
 async function getBrowser(): Promise<Browser> {
@@ -87,8 +86,7 @@ export async function closeBrowser(): Promise<void> {
 }
 
 // ────────────────────────────────────────────────
-//  دانلود فایل با https داخلی Node + retry
-//  (جایگزین axios که گاهی ETIMEDOUT می‌دهد)
+//  دانلود با https داخلی Node + retry
 // ────────────────────────────────────────────────
 export function downloadText(url: string, retries = 3): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -97,7 +95,6 @@ export function downloadText(url: string, retries = 3): Promise<string> {
       let data = "";
 
       const req = lib.get(url, { timeout: 20_000 }, (res) => {
-        // redirect
         if (
           res.statusCode &&
           res.statusCode >= 300 &&
@@ -119,9 +116,7 @@ export function downloadText(url: string, retries = 3): Promise<string> {
       req.on("timeout", () => {
         req.destroy();
         if (remaining > 1) {
-          console.warn(
-            `⚠️  دانلود timeout شد، تلاش مجدد (${remaining - 1} بار باقی)...`,
-          );
+          console.warn(`⚠️  timeout، تلاش مجدد (${remaining - 1} بار باقی)...`);
           setTimeout(() => attempt(remaining - 1), 1500);
         } else {
           reject(new Error("دانلود فایل پس از چند تلاش موفق نشد (timeout)"));
@@ -130,25 +125,21 @@ export function downloadText(url: string, retries = 3): Promise<string> {
 
       req.on("error", (err) => {
         if (remaining > 1) {
-          console.warn(`⚠️  خطای دانلود: ${err.message}، تلاش مجدد...`);
           setTimeout(() => attempt(remaining - 1), 1500);
         } else {
           reject(err);
         }
       });
     };
-
     attempt(retries);
   });
 }
 
 // ────────────────────────────────────────────────
-//  اعتبارسنجی و پاک‌سازی HTML
-//  (جلوگیری از حملات SSRF و اجرای کد مخرب)
+//  اعتبارسنجی HTML
 // ────────────────────────────────────────────────
-const MAX_HTML_SIZE = 2 * 1024 * 1024; // ۲ مگابایت
+const MAX_HTML_SIZE = 2 * 1024 * 1024;
 
-// دامنه‌های مجاز برای font/style (whitelist)
 const ALLOWED_FONT_HOSTS = [
   "fonts.googleapis.com",
   "fonts.gstatic.com",
@@ -156,15 +147,13 @@ const ALLOWED_FONT_HOSTS = [
 ];
 
 function validateHtml(html: string): void {
-  if (html.length > MAX_HTML_SIZE) {
+  if (html.length > MAX_HTML_SIZE)
     throw new Error("حجم فایل HTML بیش از ۲ مگابایت است.");
-  }
 
-  // بلاک کردن الگوهای خطرناک
   const dangerous = [
-    /<script[^>]*src\s*=\s*["']?(?!data:)/i, // script با src خارجی
-    /javascript\s*:/i, // javascript: در href/src
-    /data:\s*text\/html/i, // data URI با HTML
+    /<script[^>]*src\s*=\s*["']?(?!data:)/i,
+    /javascript\s*:/i,
+    /data:\s*text\/html/i,
     /vbscript\s*:/i,
     /<iframe/i,
     /<object/i,
@@ -178,17 +167,46 @@ function validateHtml(html: string): void {
     /window\.location/i,
   ];
 
-  for (const pattern of dangerous) {
-    if (pattern.test(html)) {
-      throw new Error(
-        `محتوای HTML به دلایل امنیتی رد شد (الگوی مشکوک: ${pattern})`,
-      );
-    }
+  for (const p of dangerous) {
+    if (p.test(html))
+      throw new Error(`محتوای HTML به دلایل امنیتی رد شد (الگوی مشکوک: ${p})`);
   }
 }
 
 // ────────────────────────────────────────────────
-//  تنظیم Page با interceptor امنیتی
+//  تزریق فونت ایموجی و فارسی به HTML
+//  (مستقل از اینکه HTML چه فونتی تعریف کرده)
+// ────────────────────────────────────────────────
+const EMOJI_FONT_INJECT = `
+<style id="__emoji_font_fix__">
+  /* فونت ایموجی را به انتهای همه font-family ها اضافه می‌کند */
+  @font-face {
+    font-family: "NotoEmoji";
+    src: local("Noto Color Emoji"), local("Apple Color Emoji"),
+         local("Segoe UI Emoji"), local("Twemoji Mozilla");
+  }
+  /* override سراسری: فونت اصلی حفظ می‌شود، ایموجی fallback اضافه می‌شود */
+  *:not(#__emoji_font_fix__) {
+    font-family: inherit, "Noto Color Emoji", "Segoe UI Emoji",
+                 "Apple Color Emoji", "Twemoji Mozilla" !important;
+  }
+  /* فارسی/عربی پیش‌فرض */
+  body {
+    font-family: "Vazirmatn", "Noto Sans Arabic", "Tahoma",
+                 "Noto Color Emoji", "Segoe UI Emoji", sans-serif;
+  }
+</style>`;
+
+function injectEmojiFont(html: string): string {
+  if (/<\/head>/i.test(html))
+    return html.replace(/<\/head>/i, `${EMOJI_FONT_INJECT}\n</head>`);
+  if (/<body/i.test(html))
+    return html.replace(/<body/i, `${EMOJI_FONT_INJECT}\n<body`);
+  return EMOJI_FONT_INJECT + "\n" + html;
+}
+
+// ────────────────────────────────────────────────
+//  Request interceptor امنیتی
 // ────────────────────────────────────────────────
 async function setupSecurePage(page: Page): Promise<void> {
   await page.setRequestInterception(true);
@@ -197,13 +215,11 @@ async function setupSecurePage(page: Page): Promise<void> {
     const url = req.url();
     const type = req.resourceType();
 
-    // اجازه به محتوای داخلی (about:blank, data:)
     if (url === "about:blank" || url.startsWith("data:")) {
       req.continue();
       return;
     }
 
-    // فونت و استایل فقط از whitelist
     if (type === "font" || type === "stylesheet") {
       try {
         const host = new URL(url).hostname;
@@ -218,14 +234,11 @@ async function setupSecurePage(page: Page): Promise<void> {
       return;
     }
 
-    // تصاویر base64 مجاز
     if (type === "image" && url.startsWith("data:image/")) {
       req.continue();
       return;
     }
 
-    // مسدود کردن همه درخواست‌های شبکه‌ای دیگر
-    // (XHR، fetch، script خارجی، iframe، ...)
     if (
       type === "xhr" ||
       type === "fetch" ||
@@ -236,11 +249,6 @@ async function setupSecurePage(page: Page): Promise<void> {
       return;
     }
 
-    // اسکریپت‌های inline (بدون src) مجاز هستند
-    if (type === "script" && url.startsWith("data:")) {
-      req.continue();
-      return;
-    }
     if (type === "script") {
       req.abort("blockedbyclient");
       return;
@@ -254,26 +262,32 @@ async function setupSecurePage(page: Page): Promise<void> {
 //  HTML → تصویر PNG
 // ────────────────────────────────────────────────
 export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
-  // اعتبارسنجی اول
   validateHtml(htmlContent);
+
+  // تزریق فونت ایموجی
+  const enrichedHtml = injectEmojiFont(htmlContent);
 
   const browser = await getBrowser();
   const page = await browser.newPage();
 
   try {
     await setupSecurePage(page);
-
-    // محدود کردن زمان اجرای JavaScript
-    page.setDefaultTimeout(30_000);
+    page.setDefaultTimeout(40_000);
 
     await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
-    await page.setContent(htmlContent, {
+
+    await page.setContent(enrichedHtml, {
       waitUntil: "networkidle0",
-      timeout: 30_000,
+      timeout: 40_000,
     });
 
-    // اجرای JS را پس از رندر غیرفعال کنیم
-    await page.setJavaScriptEnabled(false).catch(() => {});
+    // صبر برای بارگذاری کامل همه فونت‌ها (مهم برای Google Fonts و ایموجی)
+    await page.evaluateHandle("document.fonts.ready");
+
+    // یک فریم اضافه برای اطمینان از رندر نهایی
+    await page.evaluate(
+      () => new Promise<void>((r) => requestAnimationFrame(() => r())),
+    );
 
     const dims: { w: number; h: number } = await page.evaluate(() => ({
       w: Math.max(
@@ -288,7 +302,6 @@ export async function htmlFileToImage(htmlContent: string): Promise<Buffer> {
       ),
     }));
 
-    // سقف ابعاد برای جلوگیری از حمله DoS
     const safeW = Math.min(dims.w, 4096);
     const safeH = Math.min(dims.h, 8192);
 
